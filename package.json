@@ -1,0 +1,27 @@
+{
+  "name": "nessie",
+  "version": "1.0.0",
+  "description": "### System requirements To use `nessie`, you'll need to install: - [rustup](https://doc.rust-lang.org/cargo/getting-started/installation.html)  - [nodejs](https://nodejs.org/en/download/) - npm (installs with nodejs) - [yarn](https://yarnpkg.com/) (you can install this with npm)",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/emarteca/nessie.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/emarteca/nessie/issues"
+  },
+  "homepage": "https://github.com/emarteca/nessie#readme",
+  "dependencies": {
+    "jsonfile": "file:../node-jsonfile",
+    "mocha": "^11.8.0",
+    "my-calculator": "file:../my-calculator",
+    "my-json-lib": "file:../my-json-lib",
+    "nyc": "^18.0.0"
+  }
+}

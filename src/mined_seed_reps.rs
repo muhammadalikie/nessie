@@ -274,14 +274,19 @@ pub fn get_rel_mined_data_nested_extensions(
                 let inner_fct_name = mined_pair.inner_fct.clone();
                 let inner_fct_sig = inner_fct_sig.unwrap();
 
-                let outer_to_inner_dataflow = mined_pair.inner_params
+                let outer_to_inner_dataflow = mined_pair
+                    .inner_params
                     .iter()
                     .enumerate()
                     .filter_map(|(pos, inner_param)| {
-                        if let Some(var_name) = &inner_param.ident && var_name.starts_with("outer_arg_") {
-                            // get the string after the last _ and convert to a usize
-                            let (_, outer_pos) = var_name.rsplit_once('_').unwrap();
-                            Some((outer_pos.parse::<usize>().unwrap(), pos))
+                        if let Some(var_name) = &inner_param.ident {
+                            if var_name.starts_with("outer_arg_") {
+                                // get the string after the last _ and convert to a usize
+                                let (_, outer_pos) = var_name.rsplit_once('_').unwrap();
+                                Some((outer_pos.parse::<usize>().unwrap(), pos))
+                            } else {
+                                None
+                            }
                         } else {
                             None
                         }

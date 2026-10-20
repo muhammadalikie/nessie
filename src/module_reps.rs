@@ -146,7 +146,7 @@ impl NpmModule {
         }
     }
 
-    /// Add the function signatures revealed/discovered from the test execution and extension 
+    /// Add the function signatures revealed/discovered from the test execution and extension
     /// points specified.
     pub fn add_function_sigs_from_test(
         &mut self,
@@ -155,23 +155,27 @@ impl NpmModule {
     ) {
         for (ext_point_id, (fct_result, _)) in ext_point_results.iter() {
             let rel_fct = test.get_fct_call_from_id(ext_point_id);
-            if let Some(rel_fct) = rel_fct && fct_result != &FunctionCallResult::ExecutionError {
-                let fct_name = rel_fct.get_name();
-                let base_mod_import = AccessPathModuleCentred::RootPath(self.lib.clone());
-                let fct_acc_path_rep: AccessPathModuleCentred =
-                    match rel_fct.get_acc_path() {
+            if let Some(rel_fct) = rel_fct {
+                if fct_result != &FunctionCallResult::ExecutionError {
+                    let fct_name = rel_fct.get_name();
+                    let base_mod_import = AccessPathModuleCentred::RootPath(self.lib.clone());
+                    let fct_acc_path_rep: AccessPathModuleCentred = match rel_fct.get_acc_path() {
                         Some(ap) => ap,
                         None => &base_mod_import,
-                    }.clone();
-                let mut new_sig = rel_fct.sig.clone();
-                new_sig.set_call_res(*fct_result);
-                if let Some(mut_fct_desc) = self.fns.get_mut(&(
-                    (fct_acc_path_rep).clone().get_base_path().unwrap_or({
-                        &base_mod_import
-                    }).clone(),
-                    fct_name.to_string(),
-                )) {
-                    mut_fct_desc.add_sig(new_sig.clone());
+                    }
+                    .clone();
+                    let mut new_sig = rel_fct.sig.clone();
+                    new_sig.set_call_res(*fct_result);
+                    if let Some(mut_fct_desc) = self.fns.get_mut(&(
+                        (fct_acc_path_rep)
+                            .clone()
+                            .get_base_path()
+                            .unwrap_or(&base_mod_import)
+                            .clone(),
+                        fct_name.to_string(),
+                    )) {
+                        mut_fct_desc.add_sig(new_sig.clone());
+                    }
                 }
             }
         }

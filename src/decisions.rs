@@ -15,10 +15,50 @@ use rand::{
     distributions::{Alphanumeric, WeightedIndex},
     prelude::*,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::convert::TryFrom;
 use std::path::PathBuf;
 use strum::IntoEnumIterator;
+
+/// Choose only from callable candidates. Invalid or depleted weights cannot
+/// cause a panic; when no positive weight remains, use uniform sampling.
+/// Returns (original index, used_uniform_fallback).
+fn choose_callable_index<R: Rng + ?Sized>(
+    weights: &[f64],
+    callable: &[bool],
+    rng: &mut R,
+) -> Option<(usize, bool)> {
+    let candidates: Vec<(usize, f64)> = weights
+        .iter()
+        .zip(callable.iter())
+        .enumerate()
+        .filter_map(|(index, (&weight, &is_callable))| {
+            if !is_callable {
+                None
+            } else {
+                // Do not pass NaN, negative, or infinite weights to WeightedIndex.
+                let safe_weight = if weight.is_finite() && weight > 0.0 {
+                    weight
+                } else {
+                    0.0
+                };
+                Some((index, safe_weight))
+            }
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    match WeightedIndex::new(candidates.iter().map(|(_, weight)| *weight)) {
+        Ok(dist) => Some((candidates[dist.sample(rng)].0, false)),
+        Err(_) => {
+            let uniform_index = rng.gen_range(0..candidates.len());
+            Some((candidates[uniform_index].0, true))
+        }
+    }
+}
 
 /// Generate a new signature with `num_args` arguments.
 /// `sigs` is a list of previous signatures, and there's a `CHOOSE_SIG_PCT` chance of
@@ -37,8 +77,14 @@ pub fn gen_new_sig_with_cb(
         && (thread_rng().gen_range(0..=100) as f64) / 100. > CHOOSE_NEW_SIG_PCT
     {
         let vec_sigs_weights = weighted_sigs.iter().collect::<Vec<(&Vec<ArgType>, &f64)>>();
-        let dist = WeightedIndex::new(vec_sigs_weights.iter().map(|(_, weight)| **weight)).unwrap();
-        let rand_sig_index = dist.sample(&mut thread_rng());
+        let sig_weights: Vec<f64> = vec_sigs_weights
+            .iter()
+            .map(|(_, weight)| **weight)
+            .collect();
+        let all_signatures_allowed = vec![true; sig_weights.len()];
+        let (rand_sig_index, _) =
+            choose_callable_index(&sig_weights, &all_signatures_allowed, &mut thread_rng())
+                .expect("Nonempty signature set must contain a selectable signature");
         let (abstract_sig, _) = &vec_sigs_weights[rand_sig_index].clone();
         if !test_gen_mode.tracks_prim_types() {
             FunctionSignature::from(&testgen_db.randomize_prim_arg_types(abstract_sig))
@@ -80,14 +126,45 @@ type ExtensionPoints = Vec<(
     (Test, Option<ExtensionPointID>, Option<String>),
 )>;
 
-type LibFctWeightedMap = HashMap<
-    String,
-    Vec<(
-        (AccessPathModuleCentred, String),
-        f64,
-        HashMap<Vec<ArgType>, f64>,
-    )>,
->;
+type WeightedFunctionEntry = (
+    (AccessPathModuleCentred, String),
+    f64,
+    HashMap<Vec<ArgType>, f64>,
+);
+type LibFctWeightedMap = HashMap<String, Vec<WeightedFunctionEntry>>;
+
+/// Reconcile weights with the *current* API discovery result, while preserving
+/// the selection history of existing functions and signatures. This is needed
+/// because test generation may discover new API functions and signatures.
+fn synchronize_discovered_weights(
+    current: &mut Vec<WeightedFunctionEntry>,
+    discovered: &[((AccessPathModuleCentred, String), Vec<Vec<ArgType>>)],
+) {
+    let available: HashSet<_> = discovered.iter().map(|(key, _)| key.clone()).collect();
+    // A stale key must not survive: the caller indexes `mod_rep.get_fns()` by key.
+    current.retain(|(key, _, _)| available.contains(key));
+
+    let mut positions: HashMap<_, _> = current
+        .iter()
+        .enumerate()
+        .map(|(index, (key, _, _))| (key.clone(), index))
+        .collect();
+    for (key, signatures) in discovered {
+        if let Some(&index) = positions.get(key) {
+            for signature in signatures {
+                current[index].2.entry(signature.clone()).or_insert(1.0);
+            }
+        } else {
+            let sig_weights = signatures
+                .iter()
+                .cloned()
+                .map(|signature| (signature, 1.0))
+                .collect();
+            positions.insert(key.clone(), current.len());
+            current.push((key.clone(), 1.0, sig_weights));
+        }
+    }
+}
 
 /// Representation of the state of the test generator: configuration for
 /// random value generation, informed by previous tests generated/tried.
@@ -565,30 +642,37 @@ impl<'cxt> TestGenDB {
         // then the weight is 1) map of functions to test.
         // We filter out the functions rooted in access paths that don't correspond to a
         // variable (either previous return value or module import) that is in scope.
+        // Synchronize on every choice, not only on the first choice for a lib.
+        // HEAD mode can discover new functions and signatures while generating tests.
+        let mut discovered: Vec<_> = mod_rep
+            .get_fns()
+            .iter()
+            .map(|(key, fct_obj)| {
+                (
+                    key.clone(),
+                    fct_obj
+                        .get_sigs()
+                        .iter()
+                        .map(|sig| sig.get_abstract_sig())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+        // Stabilize the append order of newly discovered functions.
+        discovered.sort_by_key(|(key, _)| format!("{:?}", key));
+        synchronize_discovered_weights(
+            self.libs_fcts_weights.entry(lib_name.clone()).or_default(),
+            &discovered,
+        );
+
         let lib_fcts_weights: Vec<(
             (&AccessPathModuleCentred, &String, Vec<ArgVal>),
             f64,
             HashMap<Vec<ArgType>, f64>,
         )> = self
             .libs_fcts_weights
-            .entry(lib_name.clone())
-            .or_insert_with(|| {
-                mod_rep
-                    .get_fns()
-                    .iter()
-                    .map(|((fct_acc_path, fct_name), fct_obj)| {
-                        (
-                            (fct_acc_path.clone(), fct_name.clone()),
-                            1.0,
-                            fct_obj
-                                .get_sigs()
-                                .iter()
-                                .map(|sig| (sig.get_abstract_sig(), 1.0))
-                                .collect::<HashMap<Vec<ArgType>, f64>>(),
-                        )
-                    })
-                    .collect()
-            })
+            .get(&lib_name)
+            .expect("Function weights were initialized above")
             .iter()
             .map(|((fct_acc_path, fct_name), weight, fct_obj)| {
                 // get the list of valid receivers with the acc path
@@ -609,11 +693,22 @@ impl<'cxt> TestGenDB {
             })
             .collect();
 
-        // build the array with weights distribution, to choose a random function
-        // with non-zero weight
-        let dist =
-            WeightedIndex::new(lib_fcts_weights.iter().map(|(_, weight, _)| weight)).unwrap();
-        let rand_fct_index = dist.sample(&mut thread_rng());
+        // Exclude functions whose receivers are not in scope *before* sampling.
+        // An empty list of callable functions must be an explicit error, not index 0.
+        let weights: Vec<f64> = lib_fcts_weights
+            .iter()
+            .map(|(_, weight, _)| *weight)
+            .collect();
+        let callable: Vec<bool> = lib_fcts_weights
+            .iter()
+            .map(|((_, _, receivers), _, _)| !receivers.is_empty())
+            .collect();
+        let (rand_fct_index, used_uniform_fallback) =
+            choose_callable_index(&weights, &callable, &mut thread_rng())
+                .ok_or(DFError::NoCallableFunctions)?;
+        if used_uniform_fallback {
+            eprintln!("Warning: no usable positive function weights; uniformly sampling callable functions");
+        }
         let ((fct_receiver_acc_path, fct_name, receivers), _, fct_sigs_weights) =
             lib_fcts_weights[rand_fct_index].clone();
         let fct_call_receiver = receivers.choose(&mut rand::thread_rng());
@@ -771,5 +866,116 @@ impl<'cxt> TestGenDB {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod callable_selection_tests {
+    use super::choose_callable_index;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    #[test]
+    fn empty_function_set_is_not_indexed() {
+        let mut rng = StdRng::seed_from_u64(1);
+        assert_eq!(choose_callable_index(&[], &[], &mut rng), None);
+    }
+
+    #[test]
+    fn inaccessible_functions_are_never_selected() {
+        let mut rng = StdRng::seed_from_u64(2);
+        for _ in 0..100 {
+            let (index, _) =
+                choose_callable_index(&[100.0, 0.0, 10.0], &[false, true, false], &mut rng)
+                    .unwrap();
+            assert_eq!(index, 1);
+        }
+    }
+
+    #[test]
+    fn all_zero_weights_fall_back_to_uniform() {
+        let mut rng = StdRng::seed_from_u64(3);
+        let mut picked = [false; 3];
+        for _ in 0..300 {
+            let (index, was_fallback) =
+                choose_callable_index(&[0.0; 3], &[true; 3], &mut rng).unwrap();
+            assert!(was_fallback);
+            picked[index] = true;
+        }
+        assert!(picked.iter().all(|chosen| *chosen));
+    }
+
+    #[test]
+    fn valid_weighted_distribution_is_retained() {
+        let mut rng = StdRng::seed_from_u64(4);
+        for _ in 0..100 {
+            let (index, was_fallback) =
+                choose_callable_index(&[0.0, 8.0], &[true, true], &mut rng).unwrap();
+            assert_eq!(index, 1);
+            assert!(!was_fallback);
+        }
+    }
+
+    #[test]
+    fn non_finite_weights_cannot_crash_selection() {
+        let mut rng = StdRng::seed_from_u64(5);
+        let (index, fallback) =
+            choose_callable_index(&[f64::NAN, f64::INFINITY, -1.0], &[true; 3], &mut rng).unwrap();
+        assert!(index < 3);
+        assert!(fallback);
+    }
+}
+
+#[cfg(test)]
+mod discovery_weight_sync_tests {
+    use super::{synchronize_discovered_weights, WeightedFunctionEntry};
+    use crate::functions::ArgType;
+    use crate::module_reps::AccessPathModuleCentred;
+    use std::collections::HashMap;
+
+    #[test]
+    fn newly_discovered_functions_and_signatures_preserve_existing_history() {
+        let root = AccessPathModuleCentred::RootPath("example".into());
+        let existing_key = (root.clone(), "read".to_string());
+        let new_key = (root, "write".to_string());
+        let old_sig = vec![ArgType::StringType];
+        let extra_sig = vec![ArgType::StringType, ArgType::CallbackType];
+        let new_sig = vec![ArgType::NumberType];
+
+        let mut old_sig_weights = HashMap::new();
+        old_sig_weights.insert(old_sig.clone(), 0.125);
+        let mut weights: Vec<WeightedFunctionEntry> =
+            vec![(existing_key.clone(), 0.25, old_sig_weights)];
+        let observed = vec![
+            (
+                existing_key.clone(),
+                vec![old_sig.clone(), extra_sig.clone()],
+            ),
+            (new_key.clone(), vec![new_sig.clone()]),
+        ];
+
+        synchronize_discovered_weights(&mut weights, &observed);
+        assert_eq!(weights.len(), 2);
+        assert_eq!(weights[0].0, existing_key);
+        assert_eq!(weights[0].1, 0.25);
+        assert_eq!(weights[0].2.get(&old_sig), Some(&0.125));
+        assert_eq!(weights[0].2.get(&extra_sig), Some(&1.0));
+        assert_eq!(weights[1].0, new_key);
+        assert_eq!(weights[1].1, 1.0);
+        assert_eq!(weights[1].2.get(&new_sig), Some(&1.0));
+
+        // Calling synchronization again must not reset weights or add duplicates.
+        synchronize_discovered_weights(&mut weights, &observed);
+        assert_eq!(weights.len(), 2);
+        assert_eq!(weights[0].1, 0.25);
+        assert_eq!(weights[0].2.get(&old_sig), Some(&0.125));
+    }
+
+    #[test]
+    fn stale_functions_are_removed_before_lookup() {
+        let root = AccessPathModuleCentred::RootPath("example".into());
+        let mut weights: Vec<WeightedFunctionEntry> =
+            vec![((root, "deleted".into()), 0.5, HashMap::new())];
+        synchronize_discovered_weights(&mut weights, &[]);
+        assert!(weights.is_empty());
     }
 }

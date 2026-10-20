@@ -22,6 +22,8 @@ pub enum DFError {
     TestOutputParseError,
     /// invalid test extension option
     InvalidTestExtensionOption,
+    /// No API functions can be called at the current extension point.
+    NoCallableFunctions,
     /// error during test generation
     TestGenError(TestGenError),
 }

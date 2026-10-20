@@ -1,5 +1,5 @@
-#![feature(let_chains)]
 #![feature(iter_intersperse)]
+// #![feature(let_chains)]
 #![allow(deprecated)]
 
 //! Data and feedback directed automated test generator for JavaScript libraries.
