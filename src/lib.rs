@@ -8,6 +8,7 @@ pub mod code_gen;
 pub mod consts;
 pub mod decisions;
 pub mod errors;
+pub mod feedback;
 pub mod functions;
 pub mod legacy;
 pub mod mined_seed_reps;

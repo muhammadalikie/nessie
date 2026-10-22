@@ -4,13 +4,14 @@ use crate::code_gen;
 use crate::consts;
 use crate::decisions::TestGenDB;
 use crate::errors::*;
+use crate::feedback::{FeedbackWriter, TestFeedback};
 use crate::module_reps::*;
 use crate::tests::*;
 use crate::TestGenMode;
 
 use rand::Rng;
 use std::convert::TryInto;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Generate `num_tests` number of tests, for the specified module.
 pub fn run_testgen_phase<'cxt>(
@@ -18,11 +19,21 @@ pub fn run_testgen_phase<'cxt>(
     testgen_db: &'cxt mut TestGenDB,
     num_tests: i32,
     test_gen_mode: TestGenMode,
+    feedback_jsonl: Option<&Path>,
 ) -> Result<(), DFError> {
+    let mut feedback_writer = match feedback_jsonl {
+        Some(path) => Some(
+            FeedbackWriter::create(path)
+                .map_err(|e| DFError::WritingFeedbackError(format!("{}: {}", path.display(), e)))?,
+        ),
+        None => None,
+    };
+    let mut attempt: usize = 0;
     let mut cur_test_id = 1;
     let mut num_errors = 0;
     while cur_test_id <= num_tests.try_into().unwrap() && num_errors < consts::MAX_NUM_BROKEN_TESTS
     {
+        attempt += 1;
         // get a random extension type
         let ext_type: ExtensionType = rand::thread_rng().gen();
 
@@ -41,11 +52,23 @@ pub fn run_testgen_phase<'cxt>(
         // case complexity infinite, but in practice this doesn't happen enough to be a problem.
         // Revisit if this ends up being a problem with other packages.
         let test_results = match cur_test.execute() {
-            Ok(res) => res,
-            Err(_) => {
+            Ok(res) => {
+                if let Some(ref mut writer) = feedback_writer {
+                    writer
+                        .write(&TestFeedback::diagnosed(&cur_test, attempt, &res))
+                        .map_err(|e| DFError::WritingFeedbackError(e.to_string()))?;
+                }
+                res
+            }
+            Err(err) => {
+                if let Some(ref mut writer) = feedback_writer {
+                    writer
+                        .write(&TestFeedback::runner_error(&cur_test, attempt, &err))
+                        .map_err(|e| DFError::WritingFeedbackError(e.to_string()))?;
+                }
                 println!(
-                    "Execution error in generating test {:?} -- retrying",
-                    cur_test_id
+                    "Execution error in generating test {:?} -- retrying: {:?}",
+                    cur_test_id, err
                 );
                 num_errors += 1;
                 continue;

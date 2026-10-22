@@ -6,6 +6,7 @@ let fs = require("fs");
 const { type } = require("os");
 
 const DEFAULT_MAX_ARGS = 5;
+const { isIntendedConstructor } = require("./constructor_classifier");
 
 // https://stackoverflow.com/a/54098693
 function get_args () {
@@ -60,7 +61,7 @@ fn_names.forEach( name => {
 	cur_fn_info["num_args"] = lib[name] ? lib[name].length : 2; // if the function doesn't exist on the lib then give it 2 args 
 	cur_fn_info["name"] = name;
 	cur_fn_info["sigs"] = []; // start with no discovered signatures
-	cur_fn_info["is_constructor"] = !!lib[name] && !!lib[name].prototype && !!lib[name].prototype.constructor
+	cur_fn_info["is_constructor"] = isIntendedConstructor(lib[name]);
 	if(lib[name].toString().indexOf("...args") > -1) {
 		cur_fn_info["num_args"] = DEFAULT_MAX_ARGS;
 		cur_fn_info["used_default_args"] = true;
@@ -78,7 +79,7 @@ if (typeof lib === 'function') {
 	cur_fn_info["used_default_args"] = true;
 	cur_fn_info["name"] = name;
 	cur_fn_info["sigs"] = []; // start with no discovered signatures
-	cur_fn_info["is_constructor"] = !!lib && !!lib.prototype && !!lib.prototype.constructor
+	cur_fn_info["is_constructor"] = isIntendedConstructor(lib);
 	fn_info[name + ", " + default_acc_path] = cur_fn_info;
 }
 

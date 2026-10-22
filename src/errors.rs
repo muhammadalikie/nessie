@@ -14,6 +14,8 @@ pub enum DFError {
     InvalidMinedData(String),
     /// error printing test file (with file path)
     WritingTestError(String),
+    /// error writing the optional JSON Lines feedback trace
+    WritingFeedbackError(String),
     /// error deleting test file (with file path)
     DeletingTestError(String),
     /// error running test (could be a timeout)

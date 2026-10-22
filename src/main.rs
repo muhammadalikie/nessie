@@ -57,6 +57,11 @@ struct Opt {
     #[structopt(long, parse(from_os_str))]
     mined_call_data: Option<PathBuf>,
 
+    /// Optional JSON Lines trace of per-call execution diagnostics.
+    /// The output must not already exist (to avoid overwriting an experiment).
+    #[structopt(long, parse(from_os_str))]
+    feedback_jsonl: Option<PathBuf>,
+
     /// Mode to run the test generator in.
     /// Default: the current head of this repo.
     #[structopt(long)]
@@ -232,8 +237,14 @@ fn main() {
 
     let num_tests = opt.num_tests;
     if !opt.skip_testgen {
-        run_testgen_phase(&mut mod_rep, &mut testgen_db, num_tests, test_gen_mode)
-            .expect("Error running test generation phase: {:?}");
+        run_testgen_phase(
+            &mut mod_rep,
+            &mut testgen_db,
+            num_tests,
+            test_gen_mode,
+            opt.feedback_jsonl.as_deref(),
+        )
+        .expect("Error running test generation phase: {:?}");
     } else {
         println!("`skip-testgen` specified: Skipping test generation phase.")
     }

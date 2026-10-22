@@ -561,6 +561,7 @@ fn diagnose_test_correctness(test: &Test, output_json: &Value) -> TestDiagnostic
             return (fct_tree_results, HashMap::new());
         }
     };
+    let mut explicit_call_error = false;
     for fc in fct_tree.iter() {
         let fc_id = test.get_uniq_id_for_call(fc).to_string();
         if matches!(
@@ -569,11 +570,14 @@ fn diagnose_test_correctness(test: &Test, output_json: &Value) -> TestDiagnostic
                 .position(|r| r == &json!({"error_".to_owned() + &fc_id: true})),
             Some(_)
         ) {
+            explicit_call_error = true;
             fct_tree_results.insert(
                 fct_tree.get_node_id(fc).unwrap(),
                 (FunctionCallResult::ExecutionError, None),
             );
-            return (fct_tree_results, HashMap::new());
+            // Do not discard the results of other calls in this test.
+            // A later call may still have been executed successfully.
+            continue;
         }
         // now look through and see if the callback was executed
         // and if so, whether or not it was executed sequentially
@@ -616,7 +620,13 @@ fn diagnose_test_correctness(test: &Test, output_json: &Value) -> TestDiagnostic
             ),
         );
     }
-    let new_acc_path_fcts = get_function_props_for_acc_paths(output_vec);
+    // Preserve the previous policy for explicitly caught call errors:
+    // do not infer new API functions after an error_* marker was observed.
+    let new_acc_path_fcts = if explicit_call_error {
+        HashMap::new()
+    } else {
+        get_function_props_for_acc_paths(output_vec)
+    };
     (fct_tree_results, new_acc_path_fcts)
 }
 
@@ -658,6 +668,122 @@ fn get_function_props_for_acc_paths(
         }
     }
     ret_map
+}
+
+#[cfg(test)]
+mod diagnosis_completeness_tests {
+    use super::*;
+
+    fn two_call_test() -> Test {
+        let mut fct_tree = Arena::new();
+        let sig = FunctionSignature::new(&[], None);
+        fct_tree.new_node(FunctionCall::new(
+            "first".to_string(),
+            sig.clone(),
+            None,
+            None,
+            None,
+            None,
+            false,
+        ));
+        fct_tree.new_node(FunctionCall::new(
+            "second".to_string(),
+            sig,
+            None,
+            None,
+            None,
+            None,
+            false,
+        ));
+        Test {
+            fct_tree,
+            ext_points: Vec::new(),
+            loc_id: TestLocID {
+                cur_test_id: 1,
+                test_dir_path: "test".to_string(),
+                test_file_prefix: "test".to_string(),
+            },
+            include_basic_callback: false,
+            js_for_basic_cjs_import: String::new(),
+            mod_js_var_name: "lib".to_string(),
+            root_level_tabs: RefCell::new(0),
+        }
+    }
+
+    fn marker(key: String) -> Value {
+        let mut map = serde_json::Map::new();
+        map.insert(key, json!(true));
+        Value::Object(map)
+    }
+
+    #[test]
+    fn an_error_in_one_call_does_not_erase_later_call_diagnostics() {
+        let test = two_call_test();
+        let ids: Vec<_> = test.fct_tree.iter().collect();
+        let first_id = test.get_uniq_id_for_call(ids[0]);
+        let second_id = test.get_uniq_id_for_call(ids[1]);
+        let output = Value::Array(vec![
+            marker(format!("error_{}", first_id)),
+            marker(format!("done_{}", first_id)),
+            marker(format!("done_{}", second_id)),
+        ]);
+        let (results, new_fns) = diagnose_test_correctness(&test, &output);
+        assert_eq!(results.len(), 2);
+        let first = test.fct_tree.get_node_id(ids[0]).unwrap();
+        let second = test.fct_tree.get_node_id(ids[1]).unwrap();
+        assert_eq!(results[&first].0, FunctionCallResult::ExecutionError);
+        assert_eq!(
+            results[&second].0,
+            FunctionCallResult::SingleCallback(SingleCallCallbackTestResult::NoCallbackCalled)
+        );
+        assert!(new_fns.is_empty());
+    }
+
+    #[test]
+    fn feedback_records_match_diagnostics_for_each_call() {
+        let test = two_call_test();
+        let ids: Vec<_> = test.fct_tree.iter().collect();
+        let first_id = test.get_uniq_id_for_call(ids[0]);
+        let second_id = test.get_uniq_id_for_call(ids[1]);
+        let output = Value::Array(vec![
+            marker(format!("error_{}", first_id)),
+            marker(format!("done_{}", second_id)),
+        ]);
+        let diagnostics = diagnose_test_correctness(&test, &output);
+        let report = crate::feedback::TestFeedback::diagnosed(&test, 3, &diagnostics);
+        assert_eq!(report.test_id, 1);
+        assert_eq!(report.attempt, 3);
+        assert_eq!(report.calls.len(), 2);
+        assert_eq!(report.calls[0].call_id, first_id);
+        assert_eq!(report.calls[1].call_id, second_id);
+        assert_eq!(
+            report.calls[0].outcome,
+            Some(FunctionCallResult::ExecutionError)
+        );
+        assert_eq!(
+            report.calls[1].outcome,
+            Some(FunctionCallResult::SingleCallback(
+                SingleCallCallbackTestResult::NoCallbackCalled
+            ))
+        );
+    }
+
+    #[test]
+    fn missing_completion_is_recorded_without_suppressing_other_calls() {
+        let test = two_call_test();
+        let ids: Vec<_> = test.fct_tree.iter().collect();
+        let second_id = test.get_uniq_id_for_call(ids[1]);
+        let output = Value::Array(vec![marker(format!("done_{}", second_id))]);
+        let (results, _) = diagnose_test_correctness(&test, &output);
+        assert_eq!(results.len(), 2);
+        let first = test.fct_tree.get_node_id(ids[0]).unwrap();
+        let second = test.fct_tree.get_node_id(ids[1]).unwrap();
+        assert_eq!(results[&first].0, FunctionCallResult::ExecutionError);
+        assert_eq!(
+            results[&second].0,
+            FunctionCallResult::SingleCallback(SingleCallCallbackTestResult::NoCallbackCalled)
+        );
+    }
 }
 
 /// Structure of a test extension point.

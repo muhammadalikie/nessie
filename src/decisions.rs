@@ -364,7 +364,8 @@ impl<'cxt> TestGenDB {
                             .get_fns()
                             .keys()
                             .filter(|(fct_acc_path, _)| {
-                                fct_acc_path == &AccessPathModuleCentred::RootPath(lib_name.clone())
+                                fct_acc_path
+                                    == &AccessPathModuleCentred::RootPath(mod_rep.lib.clone())
                             })
                             .map(|(_, fct_name)| fct_name)
                             .choose(&mut thread_rng())
@@ -476,7 +477,7 @@ impl<'cxt> TestGenDB {
         test_gen_mode: &TestGenMode,
     ) -> Result<FunctionCall, DFError> {
         let lib_name = mod_rep.get_mod_js_var_name();
-        let module_root_path = AccessPathModuleCentred::RootPath(lib_name.clone());
+        let module_root_path = AccessPathModuleCentred::RootPath(mod_rep.lib.clone());
 
         let (ext_fct, ext_type, ext_uniq_id) = ext_facts;
 
@@ -568,7 +569,7 @@ impl<'cxt> TestGenDB {
         // add the root module to the valid receivers
         let root_import_val = mod_rep.get_mod_js_var_name();
         ap_receivers.insert(
-            AccessPathModuleCentred::RootPath(lib_name.clone()),
+            AccessPathModuleCentred::RootPath(mod_rep.lib.clone()),
             vec![ArgVal::Variable(root_import_val)],
         );
 
